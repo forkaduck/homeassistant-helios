@@ -6,15 +6,28 @@
         "description": "",
         "data": {
           "host": "Host or IP address of the ventilation unit",
-          "name": "Name of the integration instance"
+          "name": "Name of the integration instance",
+          "password": "Web interface password (default: !helios!)"
         }
       }
     },
     "error": {
-      "invalid_host": "Invalid hostname or IP address."
+      "cannot_connect": "Failed to connect to the unit.",
+      "invalid_auth": "Password rejected by the unit."
     },
     "abort": {
-        "already_configured": "One device of this class is already configured"
+      "already_configured": "This unit is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "user": {
+        "title": "Helios Ventilation options",
+        "data": {
+          "scan_interval": "Polling interval in seconds (the unit serves ~1 request/second - keep this at 20 or higher)"
+        }
+      }
     }
   }
 }
+

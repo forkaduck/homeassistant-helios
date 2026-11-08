@@ -4,8 +4,9 @@
   "documentation": "https://github.com/f0ckmyduck/homeassistant-helios",
   "issue_tracker": "https://github.com/f0ckmyduck/homeassistant-helios/issues",
   "config_flow": true,
-  "requirements": ["eazyctrl==0.4", "func-timeout==4.3.5"],
+  "requirements": [],
   "dependencies": [],
   "codeowners": ["@asev", "@f0ckmyduck"],
-  "version": "0.4.0"
+  "version": "0.5.0",
+  "iot_class": "local_polling"
 }

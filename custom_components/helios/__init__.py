@@ -1,206 +1,132 @@
-from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry
+"""Support for Helios ventilation units (easyControls web interface)."""
 
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.device_registry import format_mac
-from homeassistant.const import CONF_HOST, CONF_NAME
+from __future__ import annotations
 
-from func_timeout import func_timeout, FunctionTimedOut
-from queue import Queue, Empty
-from threading import Thread
 import logging
+from datetime import timedelta
 
-from .const import (
-    DOMAIN,
-    SIGNAL_HELIOS_STATE_UPDATE,
-    SCAN_INTERVAL,
+import voluptuous as vol
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+)
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
 )
 
-import eazyctrl
+from .const import (
+    BOOST_STAGES,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_PASSWORD,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    PAGE_SENSORS,
+)
+from .helioslib import HeliosAuthError, HeliosClient, HeliosError
 
-_sentinel = object()
+_LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["sensor", "fan"]
+
+BOOST_SCHEMA = vol.Schema({
+    vol.Required("entity_id"): cv.entity_ids,
+    vol.Required("speed"): vol.In(BOOST_STAGES),
+    vol.Optional("duration", default=60): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=720)),
+})
 
 
-async def async_setup(hass: HomeAssistant, config: dict):
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
-
-    # Initialize via configuration.yaml if needed
-    hass.data[DOMAIN]["config"] = config.get(DOMAIN) or {}
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    client = eazyctrl.EazyController(entry.data[CONF_HOST])
-    state_proxy = HeliosStateProxy(hass, client)
+async def async_setup_entry(hass: HomeAssistant,
+                            entry: ConfigEntry) -> bool:
+    hass.data.setdefault(DOMAIN, {})
+    client = HeliosClient(
+        entry.data[CONF_HOST],
+        entry.data.get(CONF_PASSWORD) or DEFAULT_PASSWORD,
+    )
 
-    # Set global data dictionary
-    hass.data[DOMAIN] = {
+    interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+
+    async def async_update_data():
+        """Poll ONE batch page (103 variables) instead of per variable."""
+        try:
+            return await hass.async_add_executor_job(
+                client.get_page, PAGE_SENSORS)
+        except HeliosAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except HeliosError as err:
+            raise UpdateFailed(str(err)) from err
+
+    coordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=f"{DOMAIN} {entry.data.get(CONF_NAME, DOMAIN)}",
+        update_method=async_update_data,
+        update_interval=timedelta(seconds=interval),
+    )
+
+    await coordinator.async_config_entry_first_refresh()
+
+    try:
+        device = await hass.async_add_executor_job(client.identify)
+        versions = await hass.async_add_executor_job(client.versions)
+    except HeliosError as err:
+        raise ConfigEntryNotReady(str(err)) from err
+
+    hass.data[DOMAIN][entry.entry_id] = {
         "client": client,
-        "state_proxy": state_proxy,
-        "name": entry.data[CONF_NAME]
+        "coordinator": coordinator,
+        "name": entry.data.get(CONF_NAME, DOMAIN),
+        "device": device,
+        "versions": versions,
     }
 
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(entry, "sensor"))
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(entry, "fan"))
-
-    async_track_time_interval(hass, state_proxy.async_update, SCAN_INTERVAL)
-
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _register_fan_boost(hass)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    await hass.config_entries.async_forward_entry_unload(entry, "sensor")
-    await hass.config_entries.async_forward_entry_unload(entry, "fan")
-
-    hass.data[DOMAIN]["state_proxy"].kill()
-    hass.data[DOMAIN].pop("state_proxy")
-    hass.data[DOMAIN].pop("client")
-    hass.data[DOMAIN].pop("name")
-    return True
+async def _async_update_listener(hass: HomeAssistant,
+                                 entry: ConfigEntry) -> None:
+    """Reload the entry when its options change (e.g. scan interval)."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
-class HeliosStateProxy:
+async def async_unload_entry(hass: HomeAssistant,
+                             entry: ConfigEntry) -> bool:
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        if not hass.data[DOMAIN]:
+            hass.services.async_remove(DOMAIN, "fan_boost")
+    return unload_ok
 
-    def __init__(self, hass, client):
-        self._sensors = {}
 
-        self._hass = hass
-        self._client = client
+def _register_fan_boost(hass: HomeAssistant) -> None:
+    """Register helios.fan_boost (temporary fan speed)."""
+    if hass.services.has_service(DOMAIN, "fan_boost"):
+        return
 
-        self._device = self.get_helios_var("v00000", 30)
-        self._kwl_mac = self.get_helios_var("v00002", 18)
-        self._sw_version = self.get_helios_var("v01101", 7)
+    async def handle_fan_boost(call: ServiceCall) -> None:
+        entity_ids = call.data["entity_id"]
+        stage = BOOST_STAGES[call.data["speed"]]
+        duration = call.data["duration"]
+        for data in hass.data[DOMAIN].values():
+            fan = data.get("fan")
+            if fan is not None and fan.entity_id in entity_ids:
+                await fan.async_boost(stage, duration)
 
-        if isinstance(self._kwl_mac, str):
-            self._base_unique_id = format_mac(self._kwl_mac)
-
-        else:
-            self._base_unique_id = None
-
-        # TODO error checking
-        self.register_sensor('v00101', 1, False)
-        self.register_sensor('v00102', 1, False)
-
-        # Register the Fan speed and Auto mode sensors
-        self.register_sensor('v00101', 0, True)
-        self.register_sensor('v00102', 0, True)
-
-        self._listener_queue_send = Queue()
-        self._listener_queue_receive = Queue()
-        self._listener = Thread(target=self.update)
-        self._listener.start()
-        logging.debug("Started listener thread")
-
-    def kill(self):
-        self._listener_queue_send.put(_sentinel)
-        self._listener.join()
-        logging.debug("Joined listener thread")
-
-    def get_helios_var(self, name: str, size: int) -> str | None:
-        var = None
-
-        try:
-            var = func_timeout(1,
-                               self._client.get_variable,
-                               args=(name, size))
-
-            if not isinstance(var, str):
-                logging.warning("Did not receive a return variable:" +
-                                str(var) + " -> " + name + "(" +
-                                str(size) + ")")
-
-        except (FunctionTimedOut):
-            logging.warning("Getting variable " + name + "(" + str(size) +
-                            ") timed out")
-
-        except Exception as e:
-            logging.warning("Getting variable " + name + "(" + str(size) +
-                            ") failed with the following exception: " +
-                            str(e))
-
-        return var
-
-    def set_helios_var(self, name: str, var: int) -> bool:
-        try:
-            self._client.set_variable(name, var)
-
-        except Exception as e:
-            logging.warning("Setting variable " + name + "(" + str(var) +
-                            ") failed with the following exception: " + str(e))
-            return False
-
-        return True
-
-    def is_auto(self):
-        return int(self._sensors[("v00101", 1, False)]) == 0
-
-    def get_speed(self):
-        return int(self._sensors[("v00102", 1, False)])
-
-    def set_speed(self, speed: int):
-        self.set_auto_mode(False)
-        self._sensors[('v00102', 0, True)] = speed
-
-    def set_auto_mode(self, enabled: bool):
-        self._sensors[('v00101', 0, True)] = (0 if enabled else 1)
-
-    def register_sensor(self, name, var, is_setable) -> bool:
-        if not is_setable:
-            #Check if the sensors even exists.
-            temp = self.get_helios_var(name, var)
-
-            if isinstance(temp, str):
-                if temp != "-":
-                    self._sensors[(name, var, is_setable)] = temp
-                    return True
-        else:
-            self._sensors[(name, var, is_setable)] = 0
-            return True
-
-        return False
-
-    async def async_update(self, event_time):
-        if self._listener_queue_send.empty:
-            self._listener_queue_send.put_nowait(self._sensors)
-
-        try:
-            self._sensors = self._listener_queue_receive.get_nowait()
-
-        except Empty:
-            return
-
-        async_dispatcher_send(self._hass, SIGNAL_HELIOS_STATE_UPDATE)
-        logging.debug("Update Fetched")
-
-    # Sets the retrieves all sensor values and caches them in sensors
-    def update(self):
-        while True:
-            temp = self._listener_queue_send.get()
-
-            # Break the infinite loop.
-            if temp == _sentinel:
-                break
-
-            self._sensors = temp
-
-            # Update all sensors which are registered
-            for i in self._sensors:
-                logging.debug("Updating: " + str(i[0]) + " - " + str(i[1]))
-
-                # If it is not setable, fetch the value of the sensor.
-                if not i[2]:
-                    temp = self.get_helios_var(i[0], i[1])
-
-                    if isinstance(temp, str):
-                        self._sensors[(i[0], i[1], i[2])] = temp
-
-                else:
-                    # TODO error handling
-                    self.set_helios_var(i[0], self._sensors[(i[0], i[1], i[2])]) 
-
-            if self._listener_queue_receive.empty:
-                self._listener_queue_receive.put_nowait(self._sensors)
-                logging.debug("Next sensor state update ready")
+    hass.services.async_register(
+        DOMAIN, "fan_boost", handle_fan_boost, schema=BOOST_SCHEMA)

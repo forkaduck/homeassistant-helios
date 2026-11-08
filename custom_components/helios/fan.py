@@ -1,101 +1,143 @@
-from homeassistant.core import callback
-from typing import Any
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+"""Fan platform for the Helios easyControls integration."""
 
-from homeassistant.components.fan import (
-    FanEntity,
-    FanEntityFeature,
-)
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any, Optional
+
+from homeassistant.components.fan import FanEntity, FanEntityFeature
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (DOMAIN, SIGNAL_HELIOS_STATE_UPDATE)
-
-Helios_Presets = ["Low", "Mid Low", "Mid High", "High"]
-
-async def async_setup_entry(hass, entry, async_add_entities):
-    state_proxy = hass.data[DOMAIN]["state_proxy"]
-    name = hass.data[DOMAIN]["name"]
-    async_add_entities([HeliosFan(state_proxy, name)])
+from .const import (
+    DOMAIN,
+    FAN_MODE,
+    FAN_PRESET_MODES,
+    FAN_STAGE,
+)
 
 
-class HeliosFan(FanEntity):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
+                           async_add_entities) -> None:
+    data = hass.data[DOMAIN][entry.entry_id]
+    mac = (data["device"] or {}).get("v00002") or ""
+    base_unique_id = format_mac(mac) if mac else entry.entry_id
+    fan = HeliosFan(data["coordinator"], data, base_unique_id)
+    data["fan"] = fan
+    async_add_entities([fan])
 
-    def __init__(self, state_proxy, name):
+
+class HeliosFan(CoordinatorEntity, FanEntity):
+    """Fan entity mapping the easyControls stages 0..4.
+
+    ``on`` = manual mode (v00101 = 1), ``off`` = automatic mode, like
+    the original integration. All writes are write-on-change and are
+    batched into a single request.
+    """
+
+    def __init__(self, coordinator, data, base_unique_id):
+        super().__init__(coordinator)
+        self._data = data
+        self._client = data["client"]
+        self._base_unique_id = base_unique_id
+        self._boost_unsub = None
+        self._attr_unique_id = "%s-fan" % base_unique_id
+        self._attr_name = data["name"]
         self._attr_icon = "mdi:air-filter"
-        self._attr_unique_id = state_proxy._base_unique_id + "-Fan"
-        self._attr_supported_features = FanEntityFeature.SET_SPEED | FanEntityFeature.PRESET_MODE
-        self._attr_preset_modes = Helios_Presets
-
-        self._state_proxy = state_proxy
-        self._name = name
-
-    @property
-    def should_poll(self):
-        return True
+        self._attr_supported_features = (
+            FanEntityFeature.SET_SPEED | FanEntityFeature.PRESET_MODE)
+        self._attr_preset_modes = FAN_PRESET_MODES
+        self._attr_percentage_step = 25.0
+        self._attr_speed_count = 4
 
     @property
-    def device_info(self) -> DeviceInfo | None:
+    def device_info(self) -> DeviceInfo:
+        device = self._data["device"] or {}
+        versions = self._data["versions"] or {}
         return DeviceInfo(
-            identifiers={(DOMAIN, self._state_proxy._base_unique_id)},
-            name=self._name,
+            identifiers={(DOMAIN, self._base_unique_id)},
+            name=self._data["name"],
             manufacturer="Helios",
-            model=self._state_proxy._device,
-            sw_version=self._state_proxy._sw_version,
+            model=device.get("v00000"),
+            sw_version=versions.get("v01101"),
         )
 
-    async def async_added_to_hass(self):
-        async_dispatcher_connect(self.hass, SIGNAL_HELIOS_STATE_UPDATE,
-                                 self._update_callback)
+    def _value(self, var):
+        value = (self.coordinator.data or {}).get(var)
+        return value.strip() if isinstance(value, str) else value
 
-    @callback
-    def _update_callback(self):
-        self.async_schedule_update_ha_state(True)
-
-    def set_percentage(self, val: int) -> None:
-        self._state_proxy.set_speed(val / 25)
-
-    def turn_on(self, percentage: int | None = None, preset_mode: str | None = None, **kwargs: Any) -> None:
-        self._state_proxy.set_auto_mode(False)
-
-        if preset_mode is not None:
-            counter = 1
-            for i in Helios_Presets:
-                if i == preset_mode:
-                    self._state_proxy.set_speed(counter)
-
-                counter = counter + 1
-        else:
-            if percentage is not None:
-                self._state_proxy.set_speed(percentage / 25)
-
-    def turn_off(self, **kwargs: Any) -> None:
-        self._state_proxy.set_auto_mode(True)
-
-    @property
-    def name(self) -> str | None:
-        return self._name
+    def _stage(self):
+        try:
+            return int(float(self._value(FAN_STAGE)))
+        except (TypeError, ValueError):
+            return None
 
     @property
     def is_on(self) -> bool:
-        return not self._state_proxy.is_auto()
+        return self._value(FAN_MODE) == "1"
 
     @property
-    def percentage_step(self) -> float:
-        return 4
+    def percentage(self) -> Optional[int]:
+        stage = self._stage()
+        return None if stage is None else stage * 25
 
-    @property
-    def speed_count(self) -> int:
-        return 4
+    async def async_set_percentage(self, percentage: int) -> None:
+        await self._async_apply_stage(round(percentage / 25.0))
 
-    @property
-    def percentage(self) -> int | None:
-        return self._state_proxy.get_speed() * 25
+    async def async_turn_on(self, percentage: Optional[int] = None,
+                            preset_mode: Optional[str] = None,
+                            **kwargs: Any) -> None:
+        changes = {}
+        if self._value(FAN_MODE) != "1":
+            changes[FAN_MODE] = 1
+        if preset_mode is not None:
+            changes[FAN_STAGE] = FAN_PRESET_MODES.index(preset_mode) + 1
+        elif percentage is not None:
+            changes[FAN_STAGE] = round(percentage / 25.0)
+        await self._async_write(changes)
 
-    def set_preset_mode(self, preset_mode: str) -> None:
-        counter = 1
-        for i in Helios_Presets:
-            if i == preset_mode:
-                self._state_proxy.set_speed(counter)
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        if self.is_on:
+            await self._async_write({FAN_MODE: 0})
 
-            counter = counter + 1
-        return 
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        await self._async_apply_stage(FAN_PRESET_MODES.index(preset_mode) + 1)
+
+    async def _async_apply_stage(self, stage: int) -> None:
+        stage = max(0, min(4, int(stage)))
+        changes = {}
+        if self._value(FAN_MODE) != "1":
+            changes[FAN_MODE] = 1
+        current = self._stage()
+        if current is None or current != stage:
+            changes[FAN_STAGE] = stage
+        await self._async_write(changes)
+
+    async def _async_write(self, changes: dict) -> None:
+        """Write-on-change: ONE request even for mode + stage changes."""
+        if not changes:
+            return
+        await self.hass.async_add_executor_job(
+            self._client.set_variables, changes)
+        await self.coordinator.async_request_refresh()
+
+    async def async_boost(self, stage: int, duration_minutes: int) -> None:
+        """Service handler: temporary boost stage, then restore."""
+        if self._boost_unsub is not None:
+            self._boost_unsub()
+            self._boost_unsub = None
+        previous_stage = self._stage()
+        await self._async_apply_stage(stage)
+        if previous_stage is None:
+            return
+
+        async def _restore(_now):
+            self._boost_unsub = None
+            await self._async_apply_stage(previous_stage)
+
+        self._boost_unsub = async_call_later(
+            self.hass, timedelta(minutes=duration_minutes), _restore)

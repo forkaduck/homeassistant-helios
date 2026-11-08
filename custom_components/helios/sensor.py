@@ -1,94 +1,113 @@
-from homeassistant.const import TEMP_CELSIUS
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import Entity
-from homeassistant.components.sensor import SensorEntity, STATE_CLASS_MEASUREMENT
+"""Sensor platform for the Helios easyControls integration."""
 
-from .const import (DOMAIN, SCAN_INTERVAL, SIGNAL_HELIOS_STATE_UPDATE)
+from __future__ import annotations
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import (
+    DOMAIN,
+    EXTERNAL_SENSOR_BLOCKS,
+    EXTERNAL_SENSOR_COUNT,
+    SENSOR_DEFINITIONS,
+)
+
+_DEVICE_CLASSES = {
+    "temperature": SensorDeviceClass.TEMPERATURE,
+    "humidity": SensorDeviceClass.HUMIDITY,
+    "carbon_dioxide": SensorDeviceClass.CARBON_DIOXIDE,
+}
 
 
-# Add some of the available sensors to the entity list.
-async def async_setup_entry(hass, entry, async_add_entities):
-    client = hass.data[DOMAIN]["client"]
-    name = hass.data[DOMAIN]["name"] + ' '
-    state_proxy = hass.data[DOMAIN]["state_proxy"]
+def _definitions():
+    for key, name, var, unit, device_class, icon in SENSOR_DEFINITIONS:
+        yield key, name, var, unit, device_class, icon
+    for block_key, block_name, start, unit, device_class, icon \
+            in EXTERNAL_SENSOR_BLOCKS:
+        for index in range(EXTERNAL_SENSOR_COUNT):
+            yield ("%s_%d" % (block_key, index),
+                   "%s %d" % (block_name, index),
+                   "v%05d" % (start + index),
+                   unit, device_class, icon)
 
-    # Add all the installation independent sensors which every unit should support.
-    entity_data = [
-        # Temperature sensors
-        ("Outside Air", "v00104", 7, TEMP_CELSIUS, "mdi:thermometer"),
-        ("Supply Air", "v00105", 7, TEMP_CELSIUS, "mdi:thermometer"),
-        ("Extract Air", "v00106", 7, TEMP_CELSIUS, "mdi:thermometer"),
-        ("Exhaust Air", "v00107", 7, TEMP_CELSIUS, "mdi:thermometer"),
-        ("Extract Air Humidity", "v02136", 2, "%", "mdi:water-percent"),
-        ("Supply Air Speed", "v00348", 4, "rpm", "mdi:fan"),
-        ("Extract Air Speed", "v00349", 4, "rpm", "mdi:fan"),
 
-        # Fanspeed
-        ("Fan Speed", "v00102", 1, "Step", "mdi:fan"),
+def _numeric(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in ("", "-"):
+        return None
+    for convert in (int, float):
+        try:
+            return convert(text)
+        except ValueError:
+            continue
+    return text
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
+                            async_add_entities: AddEntitiesCallback) -> None:
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator = data["coordinator"]
+    mac = (data["device"] or {}).get("v00002") or ""
+    base_unique_id = format_mac(mac) if mac else entry.entry_id
+
+    known = coordinator.data or {}
+    entities = [
+        HeliosSensor(coordinator, data, base_unique_id,
+                     key, name, var, unit, device_class, icon)
+        for key, name, var, unit, device_class, icon in _definitions()
+        if var in known
     ]
-
-    # Try to add of the possible external sensors.
-    for i in range(0, 8):
-        entity_data.append(("External CO2 " + str(i), "v00" + str(128 + i), 4,
-                            "ppm", "mdi:molecule-co2"))
-
-    for i in range(0, 8):
-        entity_data.append(("External Humidity " + str(i), "v00" + str(111 + i),
-                           4, "%", "mdi:water-percent"))
-
-    for i in range(0, 8):
-        entity_data.append(("External Temperature " + str(i), "v00" + str(119 + i),
-                            7, TEMP_CELSIUS, "mdi:thermometer"))
-
-    for i in range(0, 8):
-        entity_data.append(("Gas concentration " + str(i), "v00" + str(136 + i),
-                           4, "ppm", "mdi:gas-cylinder"))
-
-    # Try to register them in the update function of the stateproxy
-    # and if that succeeds, add them to the entity list.
-    entries = []
-    for i in entity_data:
-        if state_proxy.register_sensor(i[1], i[2], False):
-            entries.append(
-                HeliosSensor(client, state_proxy, name + i[0], i[1], i[2],
-                             i[3], i[4]))
-
-    # Add all entries from the list above.
-    async_add_entities(entries, update_before_add=False)
+    async_add_entities(entities)
 
 
-class HeliosSensor(SensorEntity):
-    def __init__(self, client, state_proxy, name, var, var_length, units,
-                 icon):
-        self._state_proxy = state_proxy
-        self._attr_unique_id = state_proxy._base_unique_id + "-" + var
+class HeliosSensor(CoordinatorEntity, SensorEntity):
+    """One easyControls variable, fed by the shared coordinator."""
 
-        self._state = None
-        self._name = name
-        self._variable = var
-        self._var_length = var_length
-        self._units = units
-        self._icon = icon
-        self._client = client
-        self._attr_state_class = STATE_CLASS_MEASUREMENT
-
-    def update(self):
-        self._state = self._state_proxy._sensors[(self._variable,
-                                                  self._var_length, False)]
+    def __init__(self, coordinator, data, base_unique_id,
+                 key, name, var, unit, device_class, icon):
+        super().__init__(coordinator)
+        self._var = var
+        self._data = data
+        self._base_unique_id = base_unique_id
+        self._attr_unique_id = "%s-%s" % (base_unique_id, key)
+        self._attr_name = "%s %s" % (data["name"], name)
+        if unit:
+            self._attr_native_unit_of_measurement = unit
+        if icon:
+            self._attr_icon = icon
+        if device_class:
+            self._attr_device_class = _DEVICE_CLASSES[device_class]
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif unit == "rpm":
+            self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
-    def name(self):
-        return self._name
+    def native_value(self):
+        return _numeric((self.coordinator.data or {}).get(self._var))
 
     @property
-    def state(self):
-        return self._state
+    def available(self) -> bool:
+        return self.native_value is not None and super().available
 
     @property
-    def icon(self):
-        return self._icon
-
-    @property
-    def unit_of_measurement(self):
-        return self._units
+    def device_info(self) -> DeviceInfo:
+        device = self._data["device"] or {}
+        versions = self._data["versions"] or {}
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._base_unique_id)},
+            name=self._data["name"],
+            manufacturer="Helios",
+            model=device.get("v00000"),
+            sw_version=versions.get("v01101"),
+        )

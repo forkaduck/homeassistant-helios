@@ -1,12 +1,38 @@
 fan_boost:
-  description: Change fan speed for limited time
+  name: Fan boost
+  description: >-
+    Runs the fan at a boost speed for a limited time, then restores the
+    previous fan stage.
   fields:
     entity_id:
-      description: Name of the entity.
-      example: "fan.helios"
+      name: Entity
+      description: Fan entity to boost.
+      example: fan.helios
+      required: true
+      selector:
+        entity:
+          integration: helios
+          domain: fan
     speed:
-      description: "Boost speed. Available: off, low, medium, high, max"
+      name: Speed
+      description: "Boost speed. One of: off, low, medium, high, max"
       example: high
+      required: true
+      selector:
+        select:
+          options:
+            - "off"
+            - "low"
+            - "medium"
+            - "high"
+            - "max"
     duration:
-      description: Duration in minutes
+      name: Duration
+      description: Duration of the boost in minutes.
       example: 60
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 720
+          unit_of_measurement: min
