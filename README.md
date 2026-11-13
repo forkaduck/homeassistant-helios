@@ -50,6 +50,21 @@ The new client (`helioslib`, bundled with the component, pure stdlib):
 4. Enter host, name, and the web interface password (the device
    default is `!helios!`).
 
+## The fan entity
+
+The unit supports four fan stages plus automatic regulation; the entity
+maps them like this:
+
+* **Presets**: `Low` (stage 1), `Mid Low` (2), `Mid High` (3), `High` (4)
+* **Percentage**: 25 % steps (0-100 %)
+* **On** = manual mode (`v00101=1`), **Off** = automatic mode
+  (`v00101=0`) - note that "automatic" still runs the fan, the unit just
+  chooses the speed itself. Stage `0` in manual mode is standby.
+
+Speed changes are only written on change, and mode + stage go to the
+unit in a single request. The active preset is reported while the unit
+is in manual mode.
+
 ## Service: `helios.fan_boost`
 
 Temporarily run the fan at a boost speed, then restore the previous
@@ -77,6 +92,24 @@ python3 tools/test_client.py monitor --interval 20 --count 100
 Record a `baseline.json` on the stock firmware, re-run after flashing a
 patched image and diff the reports (serial/parallel latencies, batch
 read latency, Modbus/TCP gateway status).
+
+## Compatibility & changelog
+
+Developed and verified against Home Assistant 2026.11 (Python 3.14).
+The fan uses the modern fan model introduced in HA 2025.6 - the UI
+slider/presets operate via `fan.turn_on(percentage=...)` /
+`fan.turn_on(preset_mode=...)`, so the entity advertises
+`TURN_ON`/`TURN_OFF` alongside the legacy `SET_SPEED`/`PRESET_MODE`
+features. The legacy `fan.set_percentage` / `fan.set_preset_mode`
+services keep working through the same code.
+
+* **0.5.2** - fan: advertise `TURN_ON`/`TURN_OFF` (fixes "not setable"
+  on HA 2025.6+), report the active preset in manual mode
+* **0.5.1** - fix sensor platform import (`SensorDeviceClass.CO2`);
+  modern `OptionsFlow` (config_entry injection, HA 2024.12+)
+* **0.5.0** - rewrite on bundled `helioslib` (HTTP batch client);
+  write-on-change, options flow (polling interval), password in the
+  config flow, working `helios.fan_boost` service
 
 ## Feedback
 
