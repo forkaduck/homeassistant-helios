@@ -69,14 +69,13 @@ class HeliosConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return HeliosOptionsFlow(config_entry)
+        # HA >= 2024.12 injects config_entry into the OptionsFlow itself;
+        # do not pass or assign it manually.
+        return HeliosOptionsFlow()
 
 
 class HeliosOptionsFlow(config_entries.OptionsFlow):
     """Options: polling interval (the unit is slow - keep >= 20 s)."""
-
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
 
     async def async_step_user(self, user_input=None):
         if user_input is not None:

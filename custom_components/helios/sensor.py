@@ -24,7 +24,7 @@ from .const import (
 _DEVICE_CLASSES = {
     "temperature": SensorDeviceClass.TEMPERATURE,
     "humidity": SensorDeviceClass.HUMIDITY,
-    "carbon_dioxide": SensorDeviceClass.CARBON_DIOXIDE,
+    "carbon_dioxide": SensorDeviceClass.CO2,
 }
 
 
