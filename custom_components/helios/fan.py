@@ -49,9 +49,12 @@ class HeliosFan(CoordinatorEntity, FanEntity):
         self._attr_name = data["name"]
         self._attr_icon = "mdi:air-filter"
         self._attr_supported_features = (
-            FanEntityFeature.SET_SPEED | FanEntityFeature.PRESET_MODE)
+            FanEntityFeature.SET_SPEED
+            | FanEntityFeature.PRESET_MODE
+            | FanEntityFeature.TURN_ON
+            | FanEntityFeature.TURN_OFF
+        )
         self._attr_preset_modes = FAN_PRESET_MODES
-        self._attr_percentage_step = 25.0
         self._attr_speed_count = 4
 
     @property
@@ -79,6 +82,15 @@ class HeliosFan(CoordinatorEntity, FanEntity):
     @property
     def is_on(self) -> bool:
         return self._value(FAN_MODE) == "1"
+
+    @property
+    def preset_mode(self) -> Optional[str]:
+        """Active preset while in manual mode (stage 1..4)."""
+        if self.is_on:
+            stage = self._stage()
+            if stage is not None and 1 <= stage <= len(FAN_PRESET_MODES):
+                return FAN_PRESET_MODES[stage - 1]
+        return None
 
     @property
     def percentage(self) -> Optional[int]:
