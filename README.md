@@ -108,6 +108,12 @@ slider/presets operate via `fan.turn_on(percentage=...)` /
 features. The legacy `fan.set_percentage` / `fan.set_preset_mode`
 services keep working through the same code.
 
+* **0.5.4** - self-healing client: on connection failures, force a fresh
+  login and retry once. The device's session state can wedge after days
+  of uptime (everything but the root page 403s, connections get dropped;
+  verified live 2026-11-14: a login POST resets it) - the coordinator
+  now recovers automatically within one poll cycle instead of staying
+  unavailable until manual intervention
 * **0.5.3** - expose `sensor.helios_fan_percentage` (v00103, statistics-
   capable) so fan speed shows in history; align the fan percentage to
   the unit's real curve 40/60/80/100 % (was 25/50/75/100); `ppm` sensors

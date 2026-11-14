@@ -79,7 +79,8 @@ class HeliosClient:
         }
 
     # -- low level ---------------------------------------------------------
-    def _request(self, method, path, body=None, auth_retry=True):
+    def _request(self, method, path, body=None, auth_retry=True,
+                 conn_retry=True):
         """One request on one fresh connection. Returns (status, text)."""
         with self._lock:
             payload = body.encode("utf-8") if isinstance(body, str) else body
@@ -95,6 +96,19 @@ class HeliosClient:
                 status = response.status
             except (OSError, http.client.HTTPException) as exc:
                 self.stats["errors"] += 1
+                if conn_retry:
+                    # The device's session state can wedge after days of
+                    # uptime: requests are dropped, or everything but the
+                    # root page 403s (including the login page). A fresh
+                    # login POST resets it (verified live 2026-11-14).
+                    # Retry once after a forced re-login.
+                    self.stats["relogins"] += 1
+                    try:
+                        self.login(force=True, conn_retry=False)
+                    except HeliosError:
+                        raise HeliosConnectionError(str(exc)) from exc
+                    return self._request(method, path, body,
+                                         auth_retry=False, conn_retry=False)
                 raise HeliosConnectionError(str(exc)) from exc
             finally:
                 try:
@@ -112,13 +126,14 @@ class HeliosClient:
             return status, text
 
     # -- authentication -----------------------------------------------------
-    def login(self, force=False):
+    def login(self, force=False, conn_retry=True):
         with self._lock:
             if self._logged_in and not force:
                 return True
             status, _ = self._request("POST", INFO_PATH,
                                       "v00402=" + self._password,
-                                      auth_retry=False)
+                                      auth_retry=False,
+                                      conn_retry=conn_retry)
             if status == 200:
                 self._logged_in = True
                 return True
