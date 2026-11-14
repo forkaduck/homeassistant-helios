@@ -18,6 +18,7 @@ from .const import (
     FAN_MODE,
     FAN_PRESET_MODES,
     FAN_STAGE,
+    FAN_STAGE_PERCENTAGES,
 )
 
 
@@ -34,6 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
 class HeliosFan(CoordinatorEntity, FanEntity):
     """Fan entity mapping the easyControls stages 0..4.
 
+    Percentages follow the unit's own curve (v00103): 40/60/80/100 %.
     ``on`` = manual mode (v00101 = 1), ``off`` = automatic mode, like
     the original integration. All writes are write-on-change and are
     batched into a single request.
@@ -55,7 +57,9 @@ class HeliosFan(CoordinatorEntity, FanEntity):
             | FanEntityFeature.TURN_OFF
         )
         self._attr_preset_modes = FAN_PRESET_MODES
-        self._attr_speed_count = 4
+        # 20 % slider steps: the unit's real curve (40/60/80/100) lands
+        # exactly on the grid; stray values quantize to the nearest stage.
+        self._attr_speed_count = 5
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -95,10 +99,16 @@ class HeliosFan(CoordinatorEntity, FanEntity):
     @property
     def percentage(self) -> Optional[int]:
         stage = self._stage()
-        return None if stage is None else stage * 25
+        return None if stage is None else FAN_STAGE_PERCENTAGES[stage]
 
     async def async_set_percentage(self, percentage: int) -> None:
-        await self._async_apply_stage(round(percentage / 25.0))
+        # Quantize to the unit's real stage curve (40/60/80/100 %);
+        # ties go to the higher stage.
+        stage = min(
+            FAN_STAGE_PERCENTAGES,
+            key=lambda s: (abs(FAN_STAGE_PERCENTAGES[s] - percentage), -s),
+        )
+        await self._async_apply_stage(stage)
 
     async def async_turn_on(self, percentage: Optional[int] = None,
                             preset_mode: Optional[str] = None,

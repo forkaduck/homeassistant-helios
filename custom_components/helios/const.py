@@ -25,7 +25,12 @@ SENSOR_DEFINITIONS = [
     ("supply_rpm", "Supply Air Speed", "v00348", "rpm", None, "mdi:fan"),
     ("extract_rpm", "Extract Air Speed", "v00349", "rpm", None, "mdi:fan"),
     ("fan_stage", "Fan Speed", "v00102", None, None, "mdi:fan"),
+    ("fan_percentage", "Fan Percentage", "v00103", "%", None, "mdi:fan"),
 ]
+
+# The unit's own percentage per stage (v00103), measured live:
+# stage 0 = 0 % (standby), 1 = 40 %, 2 = 60 %, 3 = 80 %, 4 = 100 %.
+FAN_STAGE_PERCENTAGES = {0: 0, 1: 40, 2: 60, 3: 80, 4: 100}
 
 # (key_prefix, name, first variable number, unit, device_class, icon)
 EXTERNAL_SENSOR_BLOCKS = [

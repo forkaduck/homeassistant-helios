@@ -56,14 +56,19 @@ The unit supports four fan stages plus automatic regulation; the entity
 maps them like this:
 
 * **Presets**: `Low` (stage 1), `Mid Low` (2), `Mid High` (3), `High` (4)
-* **Percentage**: 25 % steps (0-100 %)
+* **Percentage**: the unit's own curve (v00103) - `40 / 60 / 80 / 100 %`
+  for stages 1-4; the slider snaps to 20 % steps, stray values quantize
+  to the nearest stage
 * **On** = manual mode (`v00101=1`), **Off** = automatic mode
   (`v00101=0`) - note that "automatic" still runs the fan, the unit just
   chooses the speed itself. Stage `0` in manual mode is standby.
 
 Speed changes are only written on change, and mode + stage go to the
 unit in a single request. The active preset is reported while the unit
-is in manual mode.
+is in manual mode. The percentage is additionally exposed as
+`sensor.helios_fan_percentage` (unit `%`, `state_class: measurement`) -
+the fan entity itself only records on/off in history, but the sensor
+has full history graphs and long-term statistics.
 
 ## Service: `helios.fan_boost`
 
@@ -103,6 +108,10 @@ slider/presets operate via `fan.turn_on(percentage=...)` /
 features. The legacy `fan.set_percentage` / `fan.set_preset_mode`
 services keep working through the same code.
 
+* **0.5.3** - expose `sensor.helios_fan_percentage` (v00103, statistics-
+  capable) so fan speed shows in history; align the fan percentage to
+  the unit's real curve 40/60/80/100 % (was 25/50/75/100); `ppm` sensors
+  get long-term statistics too
 * **0.5.2** - fan: advertise `TURN_ON`/`TURN_OFF` (fixes "not setable"
   on HA 2025.6+), report the active preset in manual mode
 * **0.5.1** - fix sensor platform import (`SensorDeviceClass.CO2`);

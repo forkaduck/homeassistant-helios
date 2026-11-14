@@ -89,7 +89,7 @@ class HeliosSensor(CoordinatorEntity, SensorEntity):
         if device_class:
             self._attr_device_class = _DEVICE_CLASSES[device_class]
             self._attr_state_class = SensorStateClass.MEASUREMENT
-        elif unit == "rpm":
+        elif unit in ("rpm", "%", "ppm"):
             self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
